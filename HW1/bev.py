@@ -91,8 +91,8 @@ if __name__ == "__main__":
 
     pitch_ang = -90
 
-    front_rgb = "front_view.png"
-    top_rgb = "top_view.png"
+    front_rgb = "front_view1.png"
+    top_rgb = "top_view1.png"
 
     # click the pixels on window
     img = cv2.imread(top_rgb, 1)
@@ -102,5 +102,5 @@ if __name__ == "__main__":
     cv2.destroyAllWindows()
 
     projection = Projection(front_rgb, points)
-    new_pixels = projection.top_to_front(theta=pitch_ang, dy = -0.5, dz=1.5)
+    new_pixels = projection.top_to_front(theta=pitch_ang, dz=1)
     projection.show_image(new_pixels)

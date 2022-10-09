@@ -16,7 +16,7 @@ sim_settings = {
     "sensor_height": 1.5,  # Height of sensors in meters, relative to the agent
     "width": 512,  # Spatial resolution of the observations
     "height": 512,
-    "sensor_pitch": 0#-90 / 2 / np.pi,  # sensor pitch (x rotation in rads)
+    "sensor_pitch": -90 / 2 / np.pi,  # sensor pitch (x rotation in rads)
 }
 
 # This function generates a config for the simulator.

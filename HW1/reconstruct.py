@@ -4,6 +4,12 @@ import numpy as np
 from PIL import Image
 import habitat_sim
 from habitat_sim.utils.common import d3_40_colors_rgb
+from sklearn.neighbors import NearestNeighbors
+
+
+USE_O3D_ICP = 0
+ICP_MAX_ITER = 30
+ICP_SAMPLE_NUM = 2000
 
 
 test_scene = "./apartment_0/habitat/mesh_semantic.ply"
@@ -11,11 +17,12 @@ test_scene = "./apartment_0/habitat/mesh_semantic.ply"
 sim_settings = {
     "scene": test_scene,  # Scene path
     "default_agent": 0,  # Index of the default agent
-    "sensor_height": 1.5,  # Height of sensors in meters, relative to the agent
+    "sensor_height": 1,  # Height of sensors in meters, relative to the agent
     "width": 512,  # Spatial resolution of the observations
     "height": 512,
     "sensor_pitch": 0  # sensor pitch (x rotation in rads)
 }
+
 voxel_size = 8e-6
 reconstruct_point_cloud = o3d.geometry.PointCloud()
 pre_frame_pcd = None
@@ -24,6 +31,9 @@ last_transform = np.identity(4)
 
 estimated_path = []
 ground_truth_path = []
+ground_truth_init_loc = 0
+lines = []
+path_cnt = 0
 
 def transform_rgb_bgr(image):
     return image[:, :, [2, 1, 0]]
@@ -78,7 +88,7 @@ agent = sim.initialize_agent(sim_settings["default_agent"])
 
 # Set agent state
 agent_state = habitat_sim.AgentState()
-agent_state.position = np.array([0.0, 0.0, 0.0])  # agent in world space
+agent_state.position = np.array([0.0, 1.0, 0.0])  # agent in world space
 agent.set_state(agent_state)
 
 # obtain the default, discrete actions that an agent can perform
@@ -114,6 +124,71 @@ def preprocess_point_cloud(pcd, voxel_size):
     return pcd_down, pcd_fpfh
 
 
+
+def nearest_neighbor(source, target):
+    neigh = NearestNeighbors(n_neighbors=1)
+    neigh.fit(target)
+    distances, indices = neigh.kneighbors(source, return_distance=True)
+    return distances.ravel(), indices.ravel()
+
+def reject_outlier(distances, indices, voxel_size):
+    index = np.where(distances < voxel_size * 5)
+    return index[0], indices[index]
+
+def optimal_transform(source, target):
+    source_mu = np.mean(source, axis=0)
+    target_mu = np.mean(target, axis=0)
+
+    source_p = source - source_mu
+    target_p = target - target_mu
+
+    W = np.dot(source_p.T, target_p)
+    U, S, Vt = np.linalg.svd(W)
+
+    R = np.dot(Vt.T, U.T)
+
+    if np.linalg.det(R) < 0:
+        Vt[2,:] *= -1
+        R = np.dot(Vt.T, U.T)
+    
+
+    t = target_mu.T - np.dot(R, source_mu.T)
+    transform = np.identity(4)
+    transform[:3, :3] = R
+    transform[:3, 3] = t
+    return transform
+
+
+def my_local_ICP(source, target, distance_threshold, trans_init):
+    transform = np.array(trans_init)
+    source = o3d.geometry.PointCloud(source)
+    cur_iter = 0
+    mean_distance = 9999
+    source_pts = np.array(source.points)
+    target_pts = np.array(target.points)
+
+    source_iter = source.transform(transform)
+    source_iter_pts = np.array(source_iter.points)
+
+    while (cur_iter < ICP_MAX_ITER) & (mean_distance > distance_threshold):
+        sampled_src_pts = source_iter_pts[np.random.choice(source_iter_pts.shape[0], \
+            min(ICP_SAMPLE_NUM, source_iter_pts.shape[0]), replace=False), :]#random points in source
+
+        distances, indices = nearest_neighbor(sampled_src_pts, target.points)
+        indices_src, indices_target = reject_outlier(distances, indices, voxel_size)    
+        transform = optimal_transform(sampled_src_pts[indices_src, :], target_pts[indices_target, :])
+
+        source_iter = source_iter.transform(transform)
+        source_iter_pts = np.array(source_iter.points)
+        mean_distance = np.mean(distances)
+        cur_iter += 1
+    
+    transform = optimal_transform(source_pts, source_iter_pts)
+    result = o3d.pipelines.registration.RegistrationResult()
+    result.transformation = transform
+    return result
+
+
 def calculate_transform(source_down, target_down, source_fpfh,
                                      target_fpfh, voxel_size):
     distance_threshold = voxel_size * 0.5
@@ -125,16 +200,15 @@ def calculate_transform(source_down, target_down, source_fpfh,
     
     result = o3d.pipelines.registration.registration_icp(#local registration (ICP)
         source_down, target_down, distance_threshold, trans_init.transformation,
-        o3d.pipelines.registration.TransformationEstimationPointToPlane())
+        o3d.pipelines.registration.TransformationEstimationPointToPlane()) if USE_O3D_ICP \
+        else my_local_ICP(source_down, target_down, distance_threshold, trans_init.transformation)
 
     return result
 
 def navigateAndSee(action=""):
-    global pre_frame_pcd, pre_frame_pcd_fpfh, reconstruct_point_cloud, last_transform
+    global pre_frame_pcd, pre_frame_pcd_fpfh, reconstruct_point_cloud, last_transform, path_cnt, ground_truth_init_loc
     if action in action_names:
         observations = sim.step(action)
-        #print("action: ", action)
-
         cv2.imshow("RGB", transform_rgb_bgr(observations["color_sensor"]))
         cv2.imshow("depth", transform_depth(observations["depth_sensor"]))
         rgb = transform_rgb_bgr(transform_rgb_bgr(observations["color_sensor"]))
@@ -143,33 +217,50 @@ def navigateAndSee(action=""):
         sensor_state = agent_state.sensor_states['color_sensor']
         print("camera pose: x y z rw rx ry rz")
         print(sensor_state.position[0],sensor_state.position[1],sensor_state.position[2],  sensor_state.rotation.w, sensor_state.rotation.x, sensor_state.rotation.y, sensor_state.rotation.z)
-        if action == "move_forward":
-            ground_truth_path.append(sensor_state.position)
-            print("move_forward")
 
         cur_frame_pcd = depth_image_to_point_cloud(rgb, depth)
         cur_frame_pcd, cur_frame_pcd_fpfh = preprocess_point_cloud(cur_frame_pcd, voxel_size)
 
         if pre_frame_pcd == None: #for the first frame
             reconstruct_point_cloud += cur_frame_pcd
+            ground_truth_init_loc = sensor_state.position
+            ground_truth_path.append([0, 0, 0])
+            estimated_path.append([0, 0, 0])
+            
         else:
-            '''result = calculate_transform(cur_frame_pcd, pre_frame_pcd,
-                                               cur_frame_pcd_fpfh, pre_frame_pcd_fpfh,
-                                               voxel_size)
-            last_transform = np.dot(result.transformation, last_transform)
-            cur_frame_pcd.transform(last_transform)'''
-
-            result = calculate_transform(pre_frame_pcd, cur_frame_pcd,
-                                               pre_frame_pcd_fpfh, cur_frame_pcd_fpfh,
-                                               voxel_size)
-            reconstruct_point_cloud.transform(result.transformation)
-
+            result = calculate_transform(cur_frame_pcd, pre_frame_pcd,
+                                            cur_frame_pcd_fpfh, pre_frame_pcd_fpfh,
+                                            voxel_size)
+            last_transform = np.dot(last_transform, result.transformation, )
+            to_add_pcd =  o3d.geometry.PointCloud(cur_frame_pcd)
+            to_add_pcd.transform(last_transform)
             print(last_transform)
-            reconstruct_point_cloud += cur_frame_pcd
+
+            reconstruct_point_cloud += to_add_pcd
             reconstruct_point_cloud.voxel_down_sample(voxel_size)
+
+            if action == "move_forward":
+                temp = (sensor_state.position - ground_truth_init_loc) / 255 / 255 / 1.5 * 10
+                temp = np.array([temp[0], temp[1], -temp[2]])
+                ground_truth_path.append(temp)
+
+                estimated_path.append([last_transform[0,3], last_transform[1,3], last_transform[2,3]])
+                lines.append([path_cnt, path_cnt+1])
+                path_cnt += 1
+
         
         pre_frame_pcd = cur_frame_pcd
         pre_frame_pcd_fpfh = cur_frame_pcd_fpfh
+
+
+def get_lineset(path, lines, color):
+    colors = [color for _ in range(len(lines))]
+    line_set = o3d.geometry.LineSet(
+        points = o3d.utility.Vector3dVector(path),
+        lines = o3d.utility.Vector2iVector(lines),
+    )
+    line_set.colors = o3d.utility.Vector3dVector(colors)
+    return line_set
 
 
 
@@ -214,12 +305,19 @@ def main():
             points = np.asarray(reconstruct_point_cloud.points)
             reconstruct_point_cloud = reconstruct_point_cloud.select_by_index(np.where(points[:,1] > -0.00005)[0]) #remove ceiling
 
-            o3d.visualization.draw_geometries([reconstruct_point_cloud])
+            estimated_path_line = get_lineset(estimated_path, lines, (1,0,0))
+            ground_truth_path_line = get_lineset(ground_truth_path, lines, (0,0,0))
+
+            dist = np.mean(np.linalg.norm(np.array(estimated_path) - np.array(ground_truth_path), axis=1))
+            print(dist)
+
+            o3d.visualization.draw_geometries([reconstruct_point_cloud, estimated_path_line, ground_truth_path_line])
             print("action: FINISH")
             break
         else:
             print("INVALID KEY")
             continue
+    cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":
