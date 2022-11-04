@@ -131,7 +131,7 @@ agent = sim.initialize_agent(sim_settings["default_agent"])
 
 # Set agent state
 agent_state = habitat_sim.AgentState()
-agent_state.position = np.array([0.0, 1.0, 0.0])  # agent in world space
+agent_state.position = np.array([0.0, 0.0, 0.0])  # agent in world space
 agent.set_state(agent_state)
 
 # obtain the default, discrete actions that an agent can perform
@@ -179,32 +179,30 @@ def calculate_transform(source_down, target_down, source_fpfh,
 
     return result
 
-def custom_voxel_down(pcd, semantic_label, voxel_size):
-    semantic_label = np.reshape(semantic_label, semantic_label.size)
+def custom_voxel_down(pcd, voxel_size):
+    pcd_color = np.asarray(pcd.colors)
+
     min_bound = pcd.get_min_bound() - voxel_size * 0.5
     max_bound = pcd.get_max_bound() + voxel_size * 0.5
-
-    dense_color = np.asarray(pcd.colors)
-
     ret = pcd.voxel_down_sample_and_trace(voxel_size, min_bound, max_bound)
     pcd_down = ret[0]
     cubics_ids = ret[1]
     
-    sparse_color = []
+    new_pcd_color = []
     for cubic_ids in cubics_ids:
         cubic_ids = cubic_ids[cubic_ids != -1]
-        cubic_labels = semantic_label[cubic_ids]
-        label = np.bincount(cubic_labels).argmax()
-        sparse_color.append(dense_color[cubic_ids[np.where(cubic_labels == label)[0][0]]])
+        cubic_color = pcd_color[cubic_ids]
 
-    sparse_color = np.array(sparse_color)
-    pcd_down.colors = o3d.utility.Vector3dVector(sparse_color)
+        unqc, C = np.unique(cubic_color, axis=0, return_counts=True)
+        index = np.argmax(C)
+        new_pcd_color.append(pcd_color[cubic_ids[index]])
+
+    new_pcd_color = np.array(new_pcd_color)
+    pcd_down.colors = o3d.utility.Vector3dVector(new_pcd_color)
 
     return pcd_down
 
-
 def predict_semantic(rgb):
-    img_original = np.array(rgb)
     img_data = pil_to_tensor(rgb)
     singleton_batch = {'img_data': img_data[None].cuda()}
     output_size = img_data.shape[1:]
@@ -218,7 +216,7 @@ def predict_semantic(rgb):
     pred = np.clip(pred, 0, 100)
 
     pred_color = colorEncode(pred, colors).astype(np.uint8)
-    return pred, pred_color
+    return pred_color
 
 def navigateAndSee(action=""):
     global pre_frame_pcd, pre_frame_pcd_fpfh, reconstruct_point_cloud, last_transform, path_cnt, ground_truth_init_loc
@@ -231,7 +229,7 @@ def navigateAndSee(action=""):
         rgb = transform_rgb_bgr(transform_rgb_bgr(observations["color_sensor"]))
         depth = transform_depth(observations["depth_sensor"])
         semantic_GT = transform_semantic(observations["semantic_sensor"])
-        semantic_label, semantic_predict = predict_semantic(rgb)
+        semantic_predict = predict_semantic(rgb)
 
         cv2.imshow("semantic_predict", semantic_predict)
 
@@ -243,7 +241,7 @@ def navigateAndSee(action=""):
         cur_frame_pcd = depth_image_to_point_cloud(rgb, depth)
         cur_frame_pcd, cur_frame_pcd_fpfh = preprocess_point_cloud(cur_frame_pcd, voxel_size)
         cur_frame_sem_pcd = depth_image_to_point_cloud(semantic_predict, depth)
-        cur_frame_sem_pcd = custom_voxel_down(cur_frame_sem_pcd, semantic_label, voxel_size)
+        cur_frame_sem_pcd = custom_voxel_down(cur_frame_sem_pcd, voxel_size)
 
 
         if pre_frame_pcd == None: #for the first frame
@@ -263,6 +261,7 @@ def navigateAndSee(action=""):
 
             reconstruct_point_cloud += to_add_pcd
             #reconstruct_point_cloud.voxel_down_sample(voxel_size)
+            custom_voxel_down(reconstruct_point_cloud, voxel_size)
 
             if action == "move_forward":
                 temp = (sensor_state.position - ground_truth_init_loc) / 256 / 1.5 * 10 / 255
