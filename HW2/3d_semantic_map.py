@@ -195,7 +195,7 @@ def custom_voxel_down(pcd, voxel_size):
 
         unqc, C = np.unique(cubic_color, axis=0, return_counts=True)
         index = np.argmax(C)
-        new_pcd_color.append(pcd_color[cubic_ids[index]])
+        new_pcd_color.append(unqc[index])
 
     new_pcd_color = np.array(new_pcd_color)
     pcd_down.colors = o3d.utility.Vector3dVector(new_pcd_color)
