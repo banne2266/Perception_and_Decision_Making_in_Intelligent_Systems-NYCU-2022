@@ -60,9 +60,41 @@ def your_fk(robot, DH_params : dict, q : list or tuple or np.ndarray) -> np.ndar
     # -------------------------------------------------------------------------------- #
     
     #### your code ####
+    Ts = []
+    Rs = []
 
-    # A = ? # may be more than one line
-    # jacobian = ? # may be more than one line
+    for i, item in enumerate(DH_params):
+        a = item["a"]
+        a_ = np.eye(4)
+        a_[0][3] = a
+
+        d = item["d"]
+        d_ = np.eye(4)
+        d_[2][3] = d
+
+        alpha = item["alpha"]
+        alpha_ = np.eye(4)
+        alpha_[1][1] = np.cos(alpha)
+        alpha_[2][1] = np.sin(alpha)
+        alpha_[1][2] = -np.sin(alpha)
+        alpha_[2][2] = np.cos(alpha)
+
+        theta = q[i]
+        theta_ = np.eye(4)
+        theta_[0][0] = np.cos(theta)
+        theta_[1][0] = np.sin(theta)
+        theta_[0][1] = -np.sin(theta)
+        theta_[1][1] = np.cos(theta)
+
+        mat = alpha_ @ a_ @ theta_ @ d_
+        A = A @ mat
+        Ts.append(A[:3, 3])
+        Rs.append(A[:3, 2]) 
+
+
+    for i in range(len(DH_params)):
+        jacobian[:3, i] = np.cross(Rs[i], (A[:3, 3] - Ts[i]))
+        jacobian[3:, i] = Rs[i]
 
     # -45 degree adjustment along z axis
     # details : see "pybullet_robot_envs/panda_envs/robot_data/franka_panda/panda_model.urdf"

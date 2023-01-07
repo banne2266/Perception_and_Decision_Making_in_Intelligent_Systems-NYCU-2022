@@ -33,7 +33,7 @@ def pybullet_ik(robot, new_pose : list or tuple or np.ndarray,
     return joint_poses
 
 def your_ik(robot, new_pose : list or tuple or np.ndarray, 
-                max_iters : int=1000, stop_thresh : float=.001):
+                max_iters : int=4000, stop_thresh : float=.0001, step_size : int=0.01):
 
     # you may use this params to avoid joint limit
     joint_limits = np.asarray([
@@ -61,6 +61,29 @@ def your_ik(robot, new_pose : list or tuple or np.ndarray,
     # -------------------------------------------------------------------------------- #
     
     #### your code ####
+    new_pose = np.array(new_pose)
+    new_pose_mat = get_matrix_from_pose(new_pose)
+
+    for _ in range(max_iters):
+        pose_7d, jacobian = your_fk(robot, get_panda_DH_params(), tmp_q)
+        pose_7d = np.array(pose_7d)
+        pose_7d_mat = get_matrix_from_pose(pose_7d)
+
+        delta_x = new_pose_mat @ np.linalg.inv(pose_7d_mat)
+        delta_x = get_pose_from_matrix(delta_x, 6)
+
+        
+        u, s, vt = np.linalg.svd(jacobian, full_matrices=False)
+        s_inv = np.diag(s**-1)
+        jacobian_inv = vt.T @ s_inv @ u.T
+
+        delta_q = step_size * jacobian_inv @ delta_x
+        if np.linalg.norm(delta_q) < stop_thresh:
+            break
+
+        tmp_q = tmp_q + delta_q
+        tmp_q = np.clip(tmp_q, joint_limits[:, 0], joint_limits[:, 1])
+        
 
     # TODO: update tmp_q
     # tmp_q = ? # may be more than one line
@@ -250,6 +273,7 @@ def main(args):
         'test_case/ik_testcase_medium.json',
         'test_case/ik_testcase_medium_2.json',
         'test_case/ik_testcase_hard.json',
+        'test_case/ik_testcase_devil.json',
         # 'test_case/ik_testcase_easy_ta.json', # only available for TAs
         # 'test_case/ik_testcase_medium_ta.json', # only available for TAs
         # 'test_case/ik_testcase_medium_2_ta.json', # only available for TAs
